@@ -1,0 +1,18 @@
+# build
+build/
+.gradle/
+*.apk
+*.aab
+# lokal / rahasia
+local.properties
+*.jks
+*.keystore
+keystore.properties
+token*.txt
+*.env
+# suara azan (hak cipta) — taruh sendiri, lihat jadwal-sholat/README.md
+jadwal-sholat/app/src/main/res/raw/*.mp3
+# IDE
+.idea/
+*.iml
+.DS_Store

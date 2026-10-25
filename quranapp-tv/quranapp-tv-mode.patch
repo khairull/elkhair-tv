@@ -1,0 +1,1227 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 9dfafa6..b5df2a6 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -87,9 +87,7 @@ android {
+ 
+             isCrunchPngs = false
+ 
+-            if (canSignRelease) {
+-                signingConfig = signingConfigs.getByName("release")
+-            }
++            signingConfig = if (canSignRelease) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+ 
+             proguardFiles(
+                 getDefaultProguardFile("proguard-android-optimize.txt"),
+@@ -122,6 +120,12 @@ android {
+     }
+ }
+ 
++kotlin {
++    compilerOptions {
++        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
++    }
++}
++
+ room3 {
+     schemaDirectory("$projectDir/schemas")
+ }
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 91e5a87..f934b71 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -19,12 +19,16 @@
+         </intent>
+     </queries>
+ 
++    <uses-feature android:name="android.software.leanback" android:required="false" />
++    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
++
+     <application
+         android:name=".QuranApp"
+         android:allowBackup="true"
+         android:dataExtractionRules="@xml/data_extraction_rules"
+         android:enableOnBackInvokedCallback="true"
+         android:fullBackupContent="true"
++        android:banner="@drawable/tv_banner"
+         android:icon="@mipmap/icon_launcher"
+         android:label="@string/app_name"
+         android:networkSecurityConfig="@xml/network_security_config"
+@@ -66,6 +70,24 @@
+                 android:resource="@xml/recitation_player_widget_info" />
+         </receiver>
+ 
++        <activity
++            android:name=".tv.TvActivity"
++            android:exported="true"
++            android:label="Al-Qur'an TV"
++            android:banner="@drawable/tv_banner"
++            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode"
++            android:screenOrientation="landscape"
++            android:theme="@style/Theme.QuranTv">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
++            </intent-filter>
++            <intent-filter>
++                <action android:name="com.quranapp.android.action.TV_OPEN" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++        </activity>
++
+         <activity
+             android:name=".activities.MainActivity"
+             android:exported="true">
+diff --git a/app/src/main/java/com/quranapp/android/tv/TvActivity.kt b/app/src/main/java/com/quranapp/android/tv/TvActivity.kt
+new file mode 100644
+index 0000000..5273310
+--- /dev/null
++++ b/app/src/main/java/com/quranapp/android/tv/TvActivity.kt
+@@ -0,0 +1,34 @@
++package com.quranapp.android.tv
++
++import android.os.Bundle
++import android.view.WindowManager
++import androidx.activity.ComponentActivity
++import androidx.activity.compose.setContent
++import androidx.activity.viewModels
++import androidx.lifecycle.lifecycleScope
++import kotlinx.coroutines.launch
++
++/** Mode TV: layar Al-Qur'an yang nyaman dengan remote. */
++class TvActivity : ComponentActivity() {
++    private val vm: TvViewModel by viewModels()
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        val startChapter = intent.getIntExtra("chapter", 0)
++        val startVerse = intent.getIntExtra("verse", 1)
++        val autoplay = intent.getBooleanExtra("play", false)
++        lifecycleScope.launch {
++            vm.isPlaying.collect { playing ->
++                if (playing) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
++                else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
++            }
++        }
++        setContent { TvApp(vm, startChapter, startVerse, autoplay) }
++    }
++
++    override fun onDestroy() {
++        // Keluar dari aplikasi tanpa audio berjalan: hentikan sesi agar widget pemutar di Beranda kosong.
++        if (isFinishing && !vm.isPlaying.value) vm.stop()
++        super.onDestroy()
++    }
++}
+diff --git a/app/src/main/java/com/quranapp/android/tv/TvScreens.kt b/app/src/main/java/com/quranapp/android/tv/TvScreens.kt
+new file mode 100644
+index 0000000..6532ed1
+--- /dev/null
++++ b/app/src/main/java/com/quranapp/android/tv/TvScreens.kt
+@@ -0,0 +1,618 @@
++package com.quranapp.android.tv
++
++import androidx.activity.compose.BackHandler
++import androidx.compose.animation.AnimatedVisibility
++import androidx.compose.animation.core.animateFloatAsState
++import androidx.compose.animation.fadeIn
++import androidx.compose.animation.fadeOut
++import androidx.compose.foundation.BorderStroke
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.focusable
++import androidx.compose.foundation.interaction.MutableInteractionSource
++import androidx.compose.foundation.interaction.collectIsFocusedAsState
++import androidx.compose.foundation.layout.*
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.lazy.LazyRow
++import androidx.compose.foundation.lazy.grid.GridCells
++import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
++import androidx.compose.foundation.lazy.grid.itemsIndexed
++import androidx.compose.foundation.lazy.grid.rememberLazyGridState
++import androidx.compose.foundation.lazy.items
++import androidx.compose.foundation.lazy.itemsIndexed
++import androidx.compose.foundation.lazy.rememberLazyListState
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Text
++import androidx.compose.runtime.*
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.draw.scale
++import androidx.compose.ui.focus.FocusRequester
++import androidx.compose.ui.focus.focusRequester
++import androidx.compose.ui.focus.onFocusChanged
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.input.key.*
++import androidx.compose.ui.text.TextStyle
++import androidx.compose.ui.text.withStyle
++import androidx.compose.ui.text.font.Font
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.style.TextDirection
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import com.quranapp.android.R
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import java.text.SimpleDateFormat
++import java.util.Date
++import java.util.Locale
++
++// ---------- Tema ----------
++private val Bg = Color(0xFF07130F)
++private val Bg2 = Color(0xFF0D2219)
++private val Card = Color(0xFF12301F)
++private val Gold = Color(0xFFE6C068)
++private val Ink = Color(0xFFF3EEDC)
++private val Dim = Color(0xFF9DB3A6)
++private val Play = Color(0xFF1F5A3C)
++private val QuranFont = FontFamily(Font(R.font.uthmanic_hafs))
++
++private val ARABIC_SIZES = listOf(34, 42, 52, 64)
++private val TRANS_SIZES = listOf(19, 22, 26, 30)
++private val SIZE_LABEL = listOf("Kecil", "Sedang", "Besar", "Sangat besar")
++private val END_LABEL = listOf("Berhenti", "Lanjut ke surah berikutnya", "Ulangi surah ini terus")
++private val END_SHORT = listOf("Berhenti", "Lanjut surah", "Ulangi surah")
++
++private sealed class Screen {
++    object Home : Screen()
++    data class Reader(val chapter: Int, val verse: Int, val autoplay: Boolean) : Screen()
++}
++
++@Composable
++fun TvApp(vm: TvViewModel, startChapter: Int, startVerse: Int, autoplay: Boolean) {
++    var screen by remember {
++        mutableStateOf<Screen>(if (startChapter in 1..114) Screen.Reader(startChapter, startVerse, autoplay) else Screen.Home)
++    }
++    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Bg2, Bg)))) {
++        when (val s = screen) {
++            Screen.Home -> HomeScreen(vm) { ch, v, play -> screen = Screen.Reader(ch, v, play) }
++            is Screen.Reader -> key(s) {
++                ReaderScreen(vm, s.chapter, s.verse, s.autoplay,
++                    onBack = { screen = Screen.Home },
++                    onOpen = { ch, v, play -> screen = Screen.Reader(ch, v, play) })
++            }
++        }
++    }
++}
++
++// ---------- Komponen dasar ----------
++@Composable
++private fun TvButton(
++    text: String,
++    modifier: Modifier = Modifier,
++    selected: Boolean = false,
++    focusRequester: FocusRequester? = null,
++    onClick: () -> Unit,
++) {
++    val src = remember { MutableInteractionSource() }
++    val focused by src.collectIsFocusedAsState()
++    Box(
++        modifier
++            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
++            .clip(RoundedCornerShape(28.dp))
++            .background(if (focused) Gold else if (selected) Play else Card)
++            .clickable(interactionSource = src, indication = null, onClick = onClick)
++            .padding(horizontal = 22.dp, vertical = 11.dp),
++        contentAlignment = Alignment.Center,
++    ) {
++        Text(text, color = if (focused) Bg else Ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
++    }
++}
++
++@Composable
++private fun Clock() {
++    var now by remember { mutableStateOf(Date()) }
++    LaunchedEffect(Unit) { while (true) { now = Date(); delay(10_000) } }
++    Text(SimpleDateFormat("HH:mm", Locale.getDefault()).format(now), color = Ink, fontSize = 30.sp, fontWeight = FontWeight.Bold)
++}
++
++// ---------- Beranda ----------
++@Composable
++private fun HomeScreen(vm: TvViewModel, open: (Int, Int, Boolean) -> Unit) {
++    val surahs by vm.surahs.collectAsState()
++    var tab by rememberSaveable { mutableIntStateOf(0) }
++    val first = remember { FocusRequester() }
++    val scope = rememberCoroutineScope()
++    var dialog by remember { mutableStateOf<String?>(null) }
++    val lastCh = vm.prefs.lastChapter
++    val lastV = vm.prefs.lastVerse
++
++    Column(Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 28.dp)) {
++        Row(verticalAlignment = Alignment.CenterVertically) {
++            Column(Modifier.weight(1f)) {
++                Text("Al-Qur'an", color = Gold, fontSize = 40.sp, fontWeight = FontWeight.Bold)
++                Text("Pilih surah dengan tombol arah, tekan OK untuk membaca", color = Dim, fontSize = 18.sp)
++            }
++            Clock()
++        }
++        Spacer(Modifier.height(18.dp))
++        Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
++            if (lastCh in 1..114) {
++                val name = surahs.getOrNull(lastCh - 1)?.latin ?: "Surah $lastCh"
++                TvButton("▶  Lanjutkan: $name : $lastV", selected = true) { open(lastCh, lastV, false) }
++            }
++            TvButton("Surah", selected = tab == 0, focusRequester = first) { tab = 0 }
++            TvButton("Juz", selected = tab == 1) { tab = 1 }
++            TvButton("Qari", selected = false) { dialog = "reciter" }
++            TvButton("Terjemahan") { dialog = "translation" }
++        }
++        Spacer(Modifier.height(18.dp))
++        if (tab == 0) {
++            LazyVerticalGrid(
++                columns = GridCells.Fixed(3),
++                horizontalArrangement = Arrangement.spacedBy(16.dp),
++                verticalArrangement = Arrangement.spacedBy(16.dp),
++                contentPadding = PaddingValues(bottom = 32.dp, top = 6.dp, start = 6.dp, end = 6.dp),
++            ) {
++                itemsIndexed(surahs, key = { _, s -> s.no }) { _, s -> SurahCard(s) { open(s.no, 1, false) } }
++            }
++        } else {
++            LazyVerticalGrid(
++                columns = GridCells.Fixed(6),
++                horizontalArrangement = Arrangement.spacedBy(16.dp),
++                verticalArrangement = Arrangement.spacedBy(16.dp),
++                contentPadding = PaddingValues(bottom = 32.dp, top = 6.dp, start = 6.dp, end = 6.dp),
++            ) {
++                itemsIndexed((1..30).toList()) { _, j ->
++                    FocusCard(Modifier.height(110.dp), onClick = {
++                        scope.launch { vm.juzStart(j)?.let { open(it.chapterNo, it.verseNo, false) } }
++                    }) { f ->
++                        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
++                            Text("Juz", color = if (f) Bg else Dim, fontSize = 18.sp)
++                            Text("$j", color = if (f) Bg else Ink, fontSize = 36.sp, fontWeight = FontWeight.Bold)
++                        }
++                    }
++                }
++            }
++        }
++    }
++    LaunchedEffect(Unit) { delay(150); runCatching { first.requestFocus() } }
++    when (dialog) {
++        "reciter" -> ReciterDialog(vm) { dialog = null }
++        "translation" -> TranslationDialog(vm) { dialog = null }
++    }
++}
++
++@Composable
++private fun FocusCard(modifier: Modifier, onClick: () -> Unit, content: @Composable (Boolean) -> Unit) {
++    val src = remember { MutableInteractionSource() }
++    val focused by src.collectIsFocusedAsState()
++    val sc by animateFloatAsState(if (focused) 1.06f else 1f, label = "s")
++    Box(
++        modifier
++            .scale(sc)
++            .clip(RoundedCornerShape(18.dp))
++            .background(if (focused) Gold else Card)
++            .clickable(interactionSource = src, indication = null, onClick = onClick)
++    ) { content(focused) }
++}
++
++@Composable
++private fun SurahCard(s: TvSurah, onClick: () -> Unit) {
++    FocusCard(Modifier.fillMaxWidth().height(104.dp), onClick) { f ->
++        val main = if (f) Bg else Ink
++        val sub = if (f) Bg.copy(alpha = .75f) else Dim
++        Row(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
++            Box(Modifier.size(50.dp).border(BorderStroke(2.dp, if (f) Bg else Gold), CircleShape), contentAlignment = Alignment.Center) {
++                Text("${s.no}", color = main, fontSize = 19.sp, fontWeight = FontWeight.Bold)
++            }
++            Spacer(Modifier.width(14.dp))
++            Column(Modifier.weight(1f)) {
++                Text(s.latin, color = main, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
++                Text(s.meaning, color = sub, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
++                Text("${s.ayahs} ayat · ${if (s.makki) "Makkiyah" else "Madaniyah"}", color = sub, fontSize = 14.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
++            }
++            Spacer(Modifier.width(8.dp))
++            Text(s.arabic, color = if (f) Bg else Gold, fontSize = 26.sp, fontFamily = QuranFont, maxLines = 1, softWrap = false)
++        }
++    }
++}
++
++// ---------- Layar baca ----------
++@Composable
++private fun ReaderScreen(
++    vm: TvViewModel, chapter: Int, startVerse: Int, autoplay: Boolean,
++    onBack: () -> Unit, onOpen: (Int, Int, Boolean) -> Unit,
++) {
++    var data by remember { mutableStateOf<TvChapter?>(null) }
++    var reload by remember { mutableIntStateOf(0) }
++    LaunchedEffect(chapter, reload) { data = vm.loadChapter(chapter) }
++    val cur by vm.currentVerse.collectAsState()
++    val playing by vm.isPlaying.collectAsState()
++    var size by remember { mutableIntStateOf(vm.prefs.size) }
++    var showTr by remember { mutableStateOf(vm.prefs.showTranslation) }
++    var mode by remember { mutableStateOf(vm.prefs.mode) }
++    var endMode by remember { mutableIntStateOf(vm.prefs.endMode) }
++    var dialog by remember { mutableStateOf<String?>(null) }
++    var murottal by remember { mutableStateOf(false) }
++    var focusedVerse by remember { mutableIntStateOf(startVerse) }
++    var digits by remember { mutableStateOf("") }
++    var sleepAt by remember { mutableLongStateOf(0L) }
++    val list = rememberLazyListState()
++    val requesters = remember { mutableMapOf<Int, FocusRequester>() }
++    val scope = rememberCoroutineScope()
++    val reciterName by vm.reciterName.collectAsState()
++
++    val playingHere = cur.chapterNo == chapter
++    val activeVerse = if (playingHere) cur.verseNo else -1
++
++    fun focusVerse(v: Int) {
++        val d = data ?: return
++        val idx = (v.coerceIn(1, d.verses.size)) - 1
++        scope.launch {
++            list.scrollToItem(idx + 1, -90)
++            delay(60)
++            runCatching { requesters[idx + 1]?.requestFocus() }
++        }
++    }
++
++    // Mulai: fokus ke ayat awal, autoplay bila diminta
++    LaunchedEffect(data) {
++        val d = data ?: return@LaunchedEffect
++        focusVerse(startVerse)
++        if (autoplay) vm.play(chapter, startVerse)
++    }
++    // Ikuti ayat yang sedang dibaca
++    LaunchedEffect(activeVerse, playing) {
++        if (playing && activeVerse > 0 && !murottal) focusVerse(activeVerse)
++    }
++    // Pindah surah otomatis saat audio lanjut ke surah berikutnya
++    var audioWasHere by remember { mutableStateOf(false) }
++    LaunchedEffect(cur.chapterNo) {
++        val c = cur.chapterNo
++        if (c == chapter) audioWasHere = true
++        else if (audioWasHere && c in 1..114) onOpen(c, cur.verseNo.coerceAtLeast(1), false)
++    }
++    // Kembali dari murottal: fokus ke ayat terakhir
++    LaunchedEffect(murottal) { if (!murottal && data != null) focusVerse(activeVerse.takeIf { it > 0 } ?: focusedVerse) }
++    // Timer tidur
++    LaunchedEffect(sleepAt) {
++        if (sleepAt > 0) { delay((sleepAt - System.currentTimeMillis()).coerceAtLeast(0)); vm.stop(); sleepAt = 0 }
++    }
++    // Lompat nomor ayat via tombol angka
++    LaunchedEffect(digits) {
++        if (digits.isEmpty()) return@LaunchedEffect
++        delay(1300)
++        digits.toIntOrNull()?.let { focusVerse(it) }
++        digits = ""
++    }
++
++    BackHandler {
++        when {
++            dialog != null -> dialog = null
++            murottal -> murottal = false
++            else -> onBack()
++        }
++    }
++
++    val d = data
++    Box(
++        Modifier.fillMaxSize().onPreviewKeyEvent { e ->
++            if (e.type != KeyEventType.KeyDown || dialog != null) return@onPreviewKeyEvent false
++            val n = e.nativeKeyEvent.keyCode
++            when (n) {
++                in android.view.KeyEvent.KEYCODE_0..android.view.KeyEvent.KEYCODE_9 -> {
++                    digits = (digits + (n - android.view.KeyEvent.KEYCODE_0)).takeLast(3); true
++                }
++                android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
++                android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> { vm.playPause(chapter, focusedVerse); true }
++                android.view.KeyEvent.KEYCODE_MEDIA_NEXT, android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { vm.next(); true }
++                android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS, android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { vm.previous(); true }
++                android.view.KeyEvent.KEYCODE_MEDIA_STOP -> { vm.stop(); true }
++                android.view.KeyEvent.KEYCODE_MENU -> { dialog = "menu"; true }
++                android.view.KeyEvent.KEYCODE_CHANNEL_UP, android.view.KeyEvent.KEYCODE_PAGE_DOWN -> {
++                    if (chapter < 114) onOpen(chapter + 1, 1, false); true
++                }
++                android.view.KeyEvent.KEYCODE_CHANNEL_DOWN, android.view.KeyEvent.KEYCODE_PAGE_UP -> {
++                    if (chapter > 1) onOpen(chapter - 1, 1, false); true
++                }
++                else -> false
++            }
++        }
++    ) {
++        if (d != null && murottal) {
++            MurottalView(vm, d, activeVerse.takeIf { it > 0 } ?: focusedVerse, playing, size, showTr)
++        } else if (d == null) {
++            Text("Memuat…", color = Dim, fontSize = 26.sp, modifier = Modifier.align(Alignment.Center))
++        } else {
++            LazyColumn(
++                state = list,
++                modifier = Modifier.fillMaxSize(),
++                contentPadding = PaddingValues(start = 64.dp, end = 64.dp, top = 20.dp, bottom = 260.dp),
++                verticalArrangement = Arrangement.spacedBy(14.dp),
++            ) {
++                item(key = "head") {
++                    ReaderHeader(
++                        d, playing, playingHere, mode, endMode, size, showTr, reciterName, sleepAt,
++                        requesters.getOrPut(0) { FocusRequester() },
++                        onPlay = { vm.playPause(chapter, focusedVerse) },
++                        onPlayAll = { vm.play(chapter, 1) },
++                        onMenu = { dialog = it },
++                        onMurottal = { murottal = true; if (!playing) vm.playPause(chapter, focusedVerse) },
++                        onBack = onBack,
++                    )
++                }
++                if (chapter != 1 && chapter != 9) item(key = "bismillah") {
++                    Text("بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ", color = Gold, fontFamily = QuranFont,
++                        fontSize = (ARABIC_SIZES[size] - 4).sp, textAlign = TextAlign.Center,
++                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
++                }
++                itemsIndexed(d.verses, key = { _, v -> v.no }) { i, v ->
++                    val fr = requesters.getOrPut(i + 1) { FocusRequester() }
++                    VerseItem(
++                        v, size, showTr, active = v.no == activeVerse, playing = playing, fr = fr,
++                        onFocused = { focusedVerse = v.no },
++                        onClick = {
++                            if (v.no == activeVerse) vm.playPause(chapter, v.no) else vm.play(chapter, v.no)
++                        },
++                        onLeft = { if (chapter > 1) onOpen(chapter - 1, 1, false) },
++                        onRight = { if (chapter < 114) onOpen(chapter + 1, 1, false) },
++                    )
++                }
++                item(key = "end") {
++                    Row(Modifier.fillMaxWidth().padding(top = 24.dp), horizontalArrangement = Arrangement.Center) {
++                        if (chapter < 114) TvButton("Surah berikutnya ▸") { onOpen(chapter + 1, 1, false) }
++                    }
++                }
++            }
++            // Bilah status bawah
++            StatusBar(d, activeVerse, playing, mode, Modifier.align(Alignment.BottomCenter))
++        }
++        if (digits.isNotEmpty()) {
++            Box(Modifier.align(Alignment.Center).clip(RoundedCornerShape(20.dp)).background(Bg.copy(alpha = .92f)).border(2.dp, Gold, RoundedCornerShape(20.dp)).padding(horizontal = 40.dp, vertical = 24.dp)) {
++                Text("Ke ayat $digits", color = Gold, fontSize = 40.sp, fontWeight = FontWeight.Bold)
++            }
++        }
++    }
++
++    when (dialog) {
++        "mode" -> PickerDialog("Cara membaca ayat", TvPlayMode.entries.map { it.label },
++            selected = TvPlayMode.entries.indexOf(mode), onDismiss = { dialog = null }) { i ->
++            mode = TvPlayMode.entries[i]; vm.setMode(mode); dialog = null
++        }
++        "end" -> PickerDialog("Setelah surah selesai", END_LABEL, selected = endMode, onDismiss = { dialog = null }) { i ->
++            endMode = i; vm.prefs.endMode = i; vm.applyEnd(); dialog = null
++        }
++        "size" -> PickerDialog("Ukuran huruf", SIZE_LABEL, selected = size, onDismiss = { dialog = null }) {
++            size = it; vm.prefs.size = it; dialog = null; focusVerse(focusedVerse)
++        }
++        "sleep" -> PickerDialog("Timer tidur", listOf("Mati", "15 menit", "30 menit", "45 menit", "60 menit", "90 menit"),
++            selected = -1, onDismiss = { dialog = null }) { i ->
++            sleepAt = if (i == 0) 0 else System.currentTimeMillis() + listOf(0, 15, 30, 45, 60, 90)[i] * 60_000L
++            dialog = null
++        }
++        "reciter" -> ReciterDialog(vm) { dialog = null }
++        "translation" -> TranslationDialog(vm) {
++            dialog = null; showTr = true; vm.prefs.showTranslation = true; reload++
++        }
++        "tr_toggle" -> { showTr = !showTr; vm.prefs.showTranslation = showTr; dialog = null }
++        "menu" -> PickerDialog("Menu", listOf("Mode putar", "Setelah surah selesai", "Ukuran huruf", "Terjemahan tampil/sembunyi", "Pilih terjemahan", "Pilih qari", "Timer tidur", "Hentikan audio", "Layar murottal"),
++            selected = -1, onDismiss = { dialog = null }) { i ->
++            dialog = listOf("mode", "end", "size", "tr_toggle", "translation", "reciter", "sleep", null, null)[i]
++            if (i == 7) vm.stop()
++            if (i == 8) murottal = true
++        }
++    }
++}
++
++@Composable
++private fun ReaderHeader(
++    d: TvChapter, playing: Boolean, playingHere: Boolean, mode: TvPlayMode, endMode: Int, size: Int, showTr: Boolean,
++    reciter: String, sleepAt: Long, fr: FocusRequester,
++    onPlay: () -> Unit, onPlayAll: () -> Unit, onMenu: (String) -> Unit, onMurottal: () -> Unit, onBack: () -> Unit,
++) {
++    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
++        Row(verticalAlignment = Alignment.CenterVertically) {
++            Column(Modifier.weight(1f)) {
++                Text("${d.surah.no}. ${d.surah.latin}", color = Gold, fontSize = 36.sp, fontWeight = FontWeight.Bold)
++                Text("${d.surah.meaning} · ${d.surah.ayahs} ayat · ${if (d.surah.makki) "Makkiyah" else "Madaniyah"}" +
++                        (if (reciter.isNotEmpty()) " · Qari: $reciter" else ""), color = Dim, fontSize = 18.sp)
++            }
++            Text(d.surah.arabic, color = Gold, fontSize = 44.sp, fontFamily = QuranFont)
++        }
++        Spacer(Modifier.height(14.dp))
++        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(4.dp)) {
++            item { TvButton("◂ Beranda", onClick = onBack) }
++            item { TvButton(if (playing && playingHere) "❚❚ Jeda" else "▶ Putar", selected = true, focusRequester = fr, onClick = onPlay) }
++            item { TvButton("▶ Dari awal", onClick = onPlayAll) }
++            item { TvButton("Mode: ${mode.label}") { onMenu("mode") } }
++            item { TvButton("Selesai: ${END_SHORT[endMode]}") { onMenu("end") } }
++            item { TvButton("Huruf: ${SIZE_LABEL[size]}") { onMenu("size") } }
++            item { TvButton(if (showTr) "Terjemahan: Tampil" else "Terjemahan: Sembunyi") { onMenu("tr_toggle") } }
++            item { TvButton("Pilih terjemahan") { onMenu("translation") } }
++            item { TvButton("Qari") { onMenu("reciter") } }
++            item { TvButton(if (sleepAt > 0) "Timer: ${((sleepAt - System.currentTimeMillis()) / 60000).coerceAtLeast(0)} mnt" else "Timer tidur") { onMenu("sleep") } }
++            item { TvButton("Layar murottal", onClick = onMurottal) }
++        }
++        if (showTr && d.translationName.isNotEmpty())
++            Text("Terjemahan: ${d.translationName}", color = Dim, fontSize = 15.sp, modifier = Modifier.padding(top = 8.dp, start = 4.dp))
++    }
++}
++
++@Composable
++private fun VerseItem(
++    v: TvVerse, size: Int, showTr: Boolean, active: Boolean, playing: Boolean, fr: FocusRequester,
++    onFocused: () -> Unit, onClick: () -> Unit, onLeft: () -> Unit, onRight: () -> Unit,
++) {
++    var focused by remember { mutableStateOf(false) }
++    val border = when { focused -> Gold; active -> Gold.copy(alpha = .45f); else -> Color.Transparent }
++    val bg = when { active -> Play.copy(alpha = .55f); focused -> Card; else -> Card.copy(alpha = .35f) }
++    Column(
++        Modifier
++            .fillMaxWidth()
++            .focusRequester(fr)
++            .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused() }
++            .onKeyEvent { e ->
++                if (e.type != KeyEventType.KeyDown) return@onKeyEvent false
++                when (e.key) {
++                    Key.DirectionLeft -> { onLeft(); true }
++                    Key.DirectionRight -> { onRight(); true }
++                    else -> false
++                }
++            }
++            .clip(RoundedCornerShape(20.dp))
++            .background(bg)
++            .border(3.dp, border, RoundedCornerShape(20.dp))
++            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
++            .padding(horizontal = 28.dp, vertical = 18.dp)
++    ) {
++        Row(verticalAlignment = Alignment.CenterVertically) {
++            Box(Modifier.size(40.dp).clip(CircleShape).background(if (active) Gold else Bg2), contentAlignment = Alignment.Center) {
++                Text("${v.no}", color = if (active) Bg else Gold, fontSize = 17.sp, fontWeight = FontWeight.Bold)
++            }
++            if (active) Text(if (playing) "  ♪ sedang dibaca" else "  ❚❚ dijeda di sini", color = Gold, fontSize = 16.sp)
++            Spacer(Modifier.weight(1f))
++            if (focused) Text("OK = putar ayat ini", color = Dim, fontSize = 15.sp)
++        }
++        Text(
++            v.arabic,
++            style = TextStyle(
++                fontFamily = QuranFont, fontSize = ARABIC_SIZES[size].sp, lineHeight = (ARABIC_SIZES[size] * 1.9f).sp,
++                color = if (active) Color.White else Ink, textAlign = TextAlign.Right, textDirection = TextDirection.Rtl,
++            ),
++            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
++        )
++        if (showTr && v.translation.isNotEmpty()) {
++            Text(
++                v.translation, color = if (active) Ink else Dim, fontSize = TRANS_SIZES[size].sp,
++                lineHeight = (TRANS_SIZES[size] * 1.45f).sp, modifier = Modifier.padding(top = 10.dp),
++            )
++        }
++    }
++}
++
++@Composable
++private fun StatusBar(d: TvChapter, active: Int, playing: Boolean, mode: TvPlayMode, modifier: Modifier) {
++    Row(
++        modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Bg.copy(alpha = .95f))))
++            .padding(horizontal = 64.dp, vertical = 16.dp),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        Text(
++            if (active > 0) "${if (playing) "♪" else "❚❚"}  ${d.surah.latin} : $active / ${d.surah.ayahs}" else "${d.surah.latin} · ${d.surah.ayahs} ayat",
++            color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f),
++        )
++        Text("▲▼ ayat · OK putar · ◂▸ surah · angka = lompat ayat · ⏯ jeda", color = Dim, fontSize = 15.sp)
++    }
++}
++
++@Composable
++private fun MurottalView(vm: TvViewModel, d: TvChapter, verse: Int, playing: Boolean, size: Int, showTr: Boolean) {
++    val v = d.verses.getOrNull(verse - 1) ?: return
++    val word by vm.wordIndex.collectAsState()
++    val fr = remember { FocusRequester() }
++    LaunchedEffect(Unit) { delay(100); runCatching { fr.requestFocus() } }
++    val fs = ARABIC_SIZES[size] + 14
++    // Sorot kata yang sedang dibaca (bila qari punya data waktu per kata)
++    val text = remember(v, word) {
++        androidx.compose.ui.text.buildAnnotatedString {
++            v.words.forEachIndexed { i, w ->
++                if (i > 0) append(" ")
++                if (i == word) withStyle(androidx.compose.ui.text.SpanStyle(color = Gold)) { append(w) } else append(w)
++            }
++        }
++    }
++    Box(
++        Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Bg2, Color.Black)))
++            .focusRequester(fr).focusable()
++            .onKeyEvent { e ->
++                if (e.type != KeyEventType.KeyDown) return@onKeyEvent false
++                when (e.key) {
++                    Key.DirectionCenter, Key.Enter -> { vm.playPause(d.surah.no, verse); true }
++                    Key.DirectionRight, Key.DirectionDown -> { vm.next(); true }
++                    Key.DirectionLeft, Key.DirectionUp -> { vm.previous(); true }
++                    else -> false
++                }
++            }
++    ) {
++        Column(Modifier.fillMaxSize().padding(horizontal = 90.dp, vertical = 40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
++            Text("${d.surah.latin} · ayat ${v.no} dari ${d.surah.ayahs}", color = Dim, fontSize = 22.sp)
++            Spacer(Modifier.weight(1f))
++            Text(text, style = TextStyle(fontFamily = QuranFont, fontSize = fs.sp, lineHeight = (fs * 1.9f).sp,
++                color = Color.White, textAlign = TextAlign.Center, textDirection = TextDirection.Rtl),
++                maxLines = 7, overflow = TextOverflow.Ellipsis)
++            if (showTr && v.translation.isNotEmpty()) {
++                Spacer(Modifier.height(22.dp))
++                Text(v.translation, color = Ink, fontSize = (TRANS_SIZES[size] + 2).sp, textAlign = TextAlign.Center,
++                    lineHeight = ((TRANS_SIZES[size] + 2) * 1.45f).sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
++            }
++            Spacer(Modifier.weight(1f))
++            Text(if (playing) "♪ Sedang diputar — OK jeda · ◂▸ ayat · BACK kembali" else "Dijeda — OK putar · BACK kembali", color = Gold, fontSize = 18.sp)
++        }
++    }
++}
++
++// ---------- Dialog ----------
++@Composable
++private fun PickerDialog(title: String, items: List<String>, selected: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
++    val first = remember { FocusRequester() }
++    BackHandler(onBack = onDismiss)
++    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .7f)), contentAlignment = Alignment.Center) {
++        Column(
++            Modifier.widthIn(min = 460.dp, max = 760.dp).heightIn(max = 620.dp).clip(RoundedCornerShape(24.dp)).background(Bg2)
++                .border(2.dp, Gold.copy(alpha = .5f), RoundedCornerShape(24.dp)).padding(26.dp)
++        ) {
++            Text(title, color = Gold, fontSize = 28.sp, fontWeight = FontWeight.Bold)
++            Spacer(Modifier.height(14.dp))
++            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
++                itemsIndexed(items) { i, t ->
++                    TvButton((if (i == selected) "✓ " else "") + t, Modifier.fillMaxWidth(), selected = i == selected,
++                        focusRequester = if (i == maxOf(selected, 0)) first else null) { onPick(i) }
++                }
++            }
++        }
++    }
++    LaunchedEffect(Unit) { delay(80); runCatching { first.requestFocus() } }
++}
++
++@Composable
++private fun ReciterDialog(vm: TvViewModel, onDismiss: () -> Unit) {
++    val list by vm.reciters.collectAsState()
++    val cur by vm.reciterName.collectAsState()
++    LaunchedEffect(Unit) { vm.refreshReciters() }
++    if (list.isEmpty()) {
++        PickerDialog("Qari", listOf("Daftar qari belum tersedia (butuh internet)"), -1, onDismiss) { onDismiss() }
++        return
++    }
++    val labels = list.map { r -> r.getReciterName() + (r.getStyleName()?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: "") }
++    PickerDialog("Pilih qari", labels, list.indexOfFirst { it.getReciterName() == cur }, onDismiss) { i ->
++        vm.selectReciter(list[i]); onDismiss()
++    }
++}
++
++@Composable
++private fun TranslationDialog(vm: TvViewModel, onDismiss: () -> Unit) {
++    val have by vm.translations.collectAsState()
++    val dl by vm.downloadable.collectAsState()
++    val msg by vm.downloadMsg.collectAsState()
++    LaunchedEffect(Unit) { vm.refreshTranslations(); vm.loadDownloadable() }
++    val cur = vm.prefs.translation
++    val labels = listOf("Tanpa terjemahan") + have.map { it.displayName } +
++            dl.map { "⬇ Unduh: ${it.displayName} (${it.langName})" } + (if (msg.isNotEmpty()) listOf("ℹ $msg") else emptyList())
++    val sel = if (cur == "") 0 else have.indexOfFirst { it.slug == cur }.let { if (it >= 0) it + 1 else -1 }
++    PickerDialog("Terjemahan", labels, sel, onDismiss) { i ->
++        when {
++            i == 0 -> { vm.selectTranslation(""); onDismiss() }
++            i <= have.size -> { vm.selectTranslation(have[i - 1].slug); onDismiss() }
++            i <= have.size + dl.size -> vm.download(dl[i - 1 - have.size])
++            else -> {}
++        }
++    }
++}
+diff --git a/app/src/main/java/com/quranapp/android/tv/TvViewModel.kt b/app/src/main/java/com/quranapp/android/tv/TvViewModel.kt
+new file mode 100644
+index 0000000..a7fed24
+--- /dev/null
++++ b/app/src/main/java/com/quranapp/android/tv/TvViewModel.kt
+@@ -0,0 +1,306 @@
++package com.quranapp.android.tv
++
++import android.app.Application
++import android.content.Context
++import androidx.lifecycle.AndroidViewModel
++import androidx.lifecycle.viewModelScope
++import com.quranapp.android.api.models.recitation2.RecitationQuranModel
++import com.quranapp.android.api.models.translation.TranslationBookInfoModel
++import com.quranapp.android.api.models.mediaplayer.RecitationAudioKind
++import com.quranapp.android.components.reader.ChapterVersePair
++import com.quranapp.android.compose.components.player.dialogs.AudioEndBehaviour
++import com.quranapp.android.compose.utils.preferences.ReaderPreferences
++import com.quranapp.android.compose.utils.preferences.RecitationPreferences
++import com.quranapp.android.db.DatabaseProvider
++import com.quranapp.android.db.relations.SurahWithLocalizations
++import com.quranapp.android.utils.mediaplayer.RecitationController
++import com.quranapp.android.utils.mediaplayer.RecitationModelManager
++import com.quranapp.android.utils.reader.QuranScriptUtils
++import com.quranapp.android.utils.reader.factory.QuranTranslationFactory
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.SharingStarted
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.flow.map
++import kotlinx.coroutines.flow.distinctUntilChanged
++import kotlinx.coroutines.flow.stateIn
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import com.quranapp.android.api.JsonHelper
++import com.quranapp.android.api.RetrofitInstance
++import com.quranapp.android.utils.managers.TranslationDownloadManager
++import com.quranapp.android.utils.managers.ResourceDownloadStatus
++import kotlinx.serialization.json.contentOrNull
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import kotlinx.serialization.json.longOrNull
++
++/** Mode putar di TV. */
++enum class TvPlayMode(val label: String, val repeat: Int, val single: Boolean) {
++    CONTINUOUS("Putar terus", 1, false),
++    SINGLE("Per ayat", 1, true),
++    REPEAT3("Ulangi tiap ayat 3×", 3, false),
++    REPEAT5("Ulangi tiap ayat 5×", 5, false),
++    REPEAT10("Ulangi tiap ayat 10×", 10, false),
++}
++
++data class TvSurah(val no: Int, val latin: String, val meaning: String, val arabic: String, val ayahs: Int, val makki: Boolean)
++data class TvVerse(val no: Int, val arabic: String, val translation: String, val juz: Int, val words: List<String> = emptyList())
++data class TvChapter(val surah: TvSurah, val verses: List<TvVerse>, val translationName: String)
++
++class TvViewModel(app: Application) : AndroidViewModel(app) {
++    private val ctx: Context get() = getApplication()
++    private val repo = DatabaseProvider.getQuranRepository(app)
++    val controller: RecitationController = RecitationController.getInstance(app).also { it.connect() }
++    val recitation = controller.state
++    val isPlaying = controller.isPlayingState
++    /** Hanya berubah saat ayat berganti (bukan tiap kata) agar UI ringan. */
++    val currentVerse: StateFlow<ChapterVersePair> = recitation.map { it.currentVerse }.distinctUntilChanged()
++        .stateIn(viewModelScope, SharingStarted.Eagerly, ChapterVersePair(-1, -1))
++    val wordIndex: StateFlow<Int> = recitation.map { it.currentWordIndex }.distinctUntilChanged()
++        .stateIn(viewModelScope, SharingStarted.Eagerly, -1)
++    val prefs = TvPrefs(app)
++
++    val surahs: StateFlow<List<TvSurah>> = repo.getAllSurahs()
++        .map { list -> list.map { it.toTv() } }
++        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
++
++    private val _reciters = MutableStateFlow<List<RecitationQuranModel>>(emptyList())
++    val reciters = _reciters.asStateFlow()
++    private val _reciterName = MutableStateFlow("")
++    val reciterName = _reciterName.asStateFlow()
++
++    private val _translations = MutableStateFlow<List<TranslationBookInfoModel>>(emptyList())
++    val translations = _translations.asStateFlow()
++
++    /** Ayat target mode per-ayat: jeda saat ayat berpindah. */
++    private var singleTarget: ChapterVersePair? = null
++
++    init {
++        refreshReciters()
++        refreshTranslations()
++        autoIndonesian()
++        applyRepeat(); applyEnd()
++        viewModelScope.launch {
++            currentVerse.collect { cur ->
++                val t = singleTarget ?: return@collect
++                if (isPlaying.value && cur.chapterNo > 0 && (cur.chapterNo != t.chapterNo || cur.verseNo != t.verseNo)) {
++                    singleTarget = null
++                    controller.pause()
++                }
++            }
++        }
++    }
++
++    fun refreshReciters() = viewModelScope.launch {
++        val mgr = RecitationModelManager.get(ctx)
++        _reciters.value = mgr.getAllQuranModel()?.reciters.orEmpty()
++        _reciterName.value = mgr.getSelectedQuranModel()?.getReciterName().orEmpty()
++    }
++
++    fun refreshTranslations() = viewModelScope.launch {
++        _translations.value = withContext(Dispatchers.IO) {
++            QuranTranslationFactory(ctx).use { it.getAvailableTranslationBooksInfo().values.sortedBy { b -> b.displayName } }
++        }
++    }
++
++    /** Terjemahan yang bisa diunduh (bahasa Indonesia & Inggris dulu). */
++    private val _downloadable = MutableStateFlow<List<TranslationBookInfoModel>>(emptyList())
++    val downloadable = _downloadable.asStateFlow()
++    private val _downloadMsg = MutableStateFlow("")
++    val downloadMsg = _downloadMsg.asStateFlow()
++
++    fun loadDownloadable() = viewModelScope.launch {
++        _downloadMsg.value = "Memuat daftar terjemahan…"
++        runCatching {
++            val data = RetrofitInstance.github.getAvailableTranslations().string()
++            val have = _translations.value.map { it.slug }.toSet()
++            val tr = JsonHelper.json.parseToJsonElement(data).jsonObject["translations"]!!.jsonObject
++            val out = ArrayList<TranslationBookInfoModel>()
++            for (lang in listOf("in", "id", "en", "ms", "ar")) {
++                val group = tr[lang]?.jsonObject ?: continue
++                for ((slug, el) in group) {
++                    if (slug in have) continue
++                    val o = el.jsonObject
++                    out += TranslationBookInfoModel(slug).apply {
++                        langCode = lang
++                        bookName = o["book"]?.jsonPrimitive?.contentOrNull ?: ""
++                        authorName = o["author"]?.jsonPrimitive?.contentOrNull ?: ""
++                        displayName = o["displayName"]?.jsonPrimitive?.contentOrNull ?: slug
++                        langName = o["langName"]?.jsonPrimitive?.contentOrNull ?: lang
++                        version = o["version"]?.jsonPrimitive?.longOrNull ?: 1L
++                        lastUpdated = version
++                        downloadPath = o["downloadPath"]?.jsonPrimitive?.contentOrNull ?: ""
++                    }
++                }
++            }
++            _downloadable.value = out
++            _downloadMsg.value = if (out.isEmpty()) "Semua terjemahan sudah terunduh." else ""
++        }.onFailure { _downloadMsg.value = "Gagal memuat daftar (cek internet)." }
++    }
++
++    /** Sekali saja: unduh terjemahan Kemenag (Bahasa Indonesia) dan jadikan bawaan. */
++    private fun autoIndonesian() = viewModelScope.launch {
++        if (prefs.autoIdDone) return@launch
++        val have = withContext(Dispatchers.IO) { QuranTranslationFactory(ctx).use { it.getAvailableTranslationBooksInfo().values.toList() } }
++        have.firstOrNull { it.langCode == "in" || it.langCode == "id" }?.let { prefs.translation = it.slug; prefs.autoIdDone = true; refreshTranslations(); return@launch }
++        loadDownloadable().join()
++        val ids = _downloadable.value.filter { it.langCode == "in" || it.langCode == "id" }
++        val pick = ids.firstOrNull { (it.slug + it.displayName + it.authorName + it.bookName).contains(Regex("in_ministry|kemenag|kementer|ministry|agama", RegexOption.IGNORE_CASE)) } ?: ids.firstOrNull()
++        if (pick != null) { prefs.autoIdDone = true; download(pick) }
++    }
++
++    fun download(b: TranslationBookInfoModel) {
++        if (TranslationDownloadManager.isAnyDownloading()) { _downloadMsg.value = "Tunggu unduhan sebelumnya selesai…"; return }
++        _downloadMsg.value = "Mengunduh ${b.displayName}…"
++        TranslationDownloadManager.startDownload(ctx, b)
++        viewModelScope.launch {
++            TranslationDownloadManager.observeDownloadsAsFlow().collect { (slug, st) ->
++                if (slug != b.slug) return@collect
++                when (st) {
++                    is ResourceDownloadStatus.InProgress -> _downloadMsg.value = "Mengunduh ${b.displayName}… ${st.progress}%"
++                    ResourceDownloadStatus.Completed -> {
++                        _downloadMsg.value = "Selesai: ${b.displayName}"
++                        prefs.translation = b.slug
++                        refreshTranslations()
++                        _downloadable.value = _downloadable.value.filter { it.slug != b.slug }
++                    }
++                    is ResourceDownloadStatus.Failed, ResourceDownloadStatus.Cancelled -> _downloadMsg.value = "Gagal mengunduh ${b.displayName}"
++                    else -> {}
++                }
++            }
++        }
++    }
++
++    fun selectReciter(m: RecitationQuranModel) {
++        controller.setReciter(m.id, RecitationAudioKind.QURAN)
++        _reciterName.value = m.getReciterName()
++    }
++
++    fun selectTranslation(slug: String?) = viewModelScope.launch {
++        prefs.translation = slug ?: ""
++    }
++
++    suspend fun loadChapter(no: Int): TvChapter? = withContext(Dispatchers.IO) {
++        val s = repo.getSurahWithLocalizations(no) ?: return@withContext null
++        val count = s.surah.ayahCount
++        val batch = repo.loadVersesBatch(no, 1, count, QuranScriptUtils.SCRIPT_UTHMANI, true) ?: return@withContext null
++        var slug = prefs.translation
++        if (slug == null) slug = ReaderPreferences.primaryTranslationSlug()
++        var tName = ""
++        val tr: List<String> = if (slug.isEmpty()) List(count) { "" } else QuranTranslationFactory(ctx).use { f ->
++            tName = f.getAvailableTranslationBooksInfo()[slug]?.displayName.orEmpty()
++            f.getTranslationsVerseRange(setOf(slug), no, 1, count).map { l -> l.firstOrNull()?.text?.let(::cleanTranslation).orEmpty() }
++        }
++        val verses = (1..count).map { v ->
++            val words = batch.wordsByVerseNo[v].orEmpty().sortedBy { it.wordIndex }
++            TvVerse(v, words.joinToString(" ") { it.text }, tr.getOrElse(v - 1) { "" }, batch.ayahByVerseNo[v]?.juzNo ?: 0, words.map { it.text })
++        }
++        TvChapter(s.toTv(), verses, tName)
++    }
++
++    suspend fun juzStart(juz: Int): ChapterVersePair? = withContext(Dispatchers.IO) {
++        repo.getChapterVerseRangesInJuz(juz).firstOrNull()?.let { ChapterVersePair(it.first, it.second.first) }
++    }
++
++    /** Putar mulai ayat [verse] dengan mode sekarang. */
++    fun play(chapter: Int, verse: Int) {
++        val mode = prefs.mode
++        applyRepeat()
++        applyEnd()
++        singleTarget = if (mode.single) ChapterVersePair(chapter, verse) else null
++        controller.start(ChapterVersePair(chapter, verse))
++        prefs.lastChapter = chapter
++        prefs.lastVerse = verse
++    }
++
++    /** 0 = berhenti, 1 = lanjut surah berikutnya, 2 = ulangi surah ini. */
++    fun applyEnd() {
++        val b = when (prefs.endMode) {
++            1 -> AudioEndBehaviour.NEXT_CHAPTER
++            2 -> AudioEndBehaviour.REPEAT_CHAPTER
++            else -> AudioEndBehaviour.STOP_PLAYBACK
++        }
++        controller.setAudioEndBehaviour(b)
++        // Simpan juga ke setelan pemutar agar tetap berlaku bila layanan audio dibuat ulang
++        viewModelScope.launch { runCatching { RecitationPreferences.setAudioEndBehaviour(b) } }
++    }
++
++    fun applyRepeat() {
++        val r = prefs.mode.repeat - 1 // 0 = sekali baca
++        controller.setRepeatCount(r)
++        viewModelScope.launch { runCatching { RecitationPreferences.setRepeatCount(r) } }
++    }
++
++    fun setMode(m: TvPlayMode) { prefs.mode = m; applyRepeat() }
++
++    fun playPause(chapter: Int, verse: Int) {
++        applyRepeat(); applyEnd()
++        val st = recitation.value
++        if (st.currentVerse.chapterNo == chapter && st.currentVerse.verseNo > 0) {
++            if (!isPlaying.value && prefs.mode.single) singleTarget = st.currentVerse
++            controller.playPause()
++        } else play(chapter, verse)
++    }
++
++    fun next() { if (prefs.mode.single) singleTarget = null; controller.nextVerse() }
++    fun previous() { if (prefs.mode.single) singleTarget = null; controller.previousVerse() }
++    fun stop() { singleTarget = null; controller.stop() }
++
++    override fun onCleared() {
++        controller.disconnect()
++        super.onCleared()
++    }
++
++    private fun SurahWithLocalizations.toTv(): TvSurah {
++        fun loc(lang: String) = localizations.firstOrNull { it.langCode == lang }
++        val id = loc("id"); val en = loc("en")
++        return TvSurah(
++            surah.surahNo,
++            id?.name ?: en?.name ?: getCurrentName(),
++            id?.meaning ?: en?.meaning ?: getCurrentMeaning(),
++            loc("ar")?.name.orEmpty(),
++            surah.ayahCount,
++            surah.revelationType.toString().lowercase().contains("mak") || surah.revelationType.toString().lowercase().contains("mec"),
++        )
++    }
++
++    companion object {
++        private val SUP = Regex("<(sup|fn)[^>]*>.*?</(sup|fn)>", RegexOption.IGNORE_CASE)
++        private val TAG = Regex("<[^>]*>")
++        private val FN = Regex("\\[\\d+]|\\(\\d+\\)$")
++        fun cleanTranslation(s: String): String = s.replace(SUP, "").replace(TAG, "").replace(FN, "").replace(Regex("\\s+"), " ").trim()
++    }
++}
++
++/** Setelan khusus mode TV. */
++class TvPrefs(ctx: Context) {
++    private val sp = ctx.getSharedPreferences("tv_mode", Context.MODE_PRIVATE)
++    var mode: TvPlayMode
++        get() = runCatching { TvPlayMode.valueOf(sp.getString("mode", "CONTINUOUS")!!) }.getOrDefault(TvPlayMode.CONTINUOUS)
++        set(v) = sp.edit().putString("mode", v.name).apply()
++    var endMode: Int
++        get() = sp.getInt("end_mode", if (sp.getBoolean("next_surah", false)) 1 else 0)
++        set(v) = sp.edit().putInt("end_mode", v).apply()
++    /** 0 kecil, 1 sedang, 2 besar, 3 sangat besar. */
++    var size: Int
++        get() = sp.getInt("size", 1)
++        set(v) = sp.edit().putInt("size", v).apply()
++    var showTranslation: Boolean
++        get() = sp.getBoolean("show_tr", true)
++        set(v) = sp.edit().putBoolean("show_tr", v).apply()
++    /** null = ikuti aplikasi; "" = tanpa terjemahan. */
++    var translation: String?
++        get() = sp.getString("translation", null)
++        set(v) = sp.edit().putString("translation", v).apply()
++    var autoIdDone: Boolean
++        get() = sp.getBoolean("auto_id", false)
++        set(v) = sp.edit().putBoolean("auto_id", v).apply()
++    var lastChapter: Int
++        get() = sp.getInt("last_ch", 0)
++        set(v) = sp.edit().putInt("last_ch", v).apply()
++    var lastVerse: Int
++        get() = sp.getInt("last_v", 1)
++        set(v) = sp.edit().putInt("last_v", v).apply()
++}
+diff --git a/app/src/main/java/com/quranapp/android/utils/mediaplayer/RecitationService.kt b/app/src/main/java/com/quranapp/android/utils/mediaplayer/RecitationService.kt
+index 7c22607..81888a6 100644
+--- a/app/src/main/java/com/quranapp/android/utils/mediaplayer/RecitationService.kt
++++ b/app/src/main/java/com/quranapp/android/utils/mediaplayer/RecitationService.kt
+@@ -235,6 +235,14 @@ class RecitationService : MediaLibraryService() {
+     }
+ 
+     private fun buildReaderPendingIntent(verse: ChapterVersePair): PendingIntent {
++        // Di Android TV: buka Mode TV pada ayat yang sedang dibaca.
++        if (packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)) {
++            val tv = android.content.Intent(this, com.quranapp.android.tv.TvActivity::class.java)
++                .putExtra("chapter", if (verse.isValid) verse.chapterNo else 0)
++                .putExtra("verse", if (verse.isValid) verse.verseNo else 1)
++                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
++            return PendingIntent.getActivity(this, 1, tv, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
++        }
+         val launchIntent = if (verse.isValid) {
+             ReaderFactory.prepareSingleVerseIntent(verse.chapterNo, verse.verseNo)
+         } else {
+diff --git a/app/src/main/res/drawable-xhdpi/tv_banner.png b/app/src/main/res/drawable-xhdpi/tv_banner.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..95538588df354a84a3e2390983243bab784cb8ca
+GIT binary patch
+literal 7152
+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
+D=WfQK
+
+literal 0
+HcmV?d00001
+
+diff --git a/app/src/main/res/values/tv_styles.xml b/app/src/main/res/values/tv_styles.xml
+new file mode 100644
+index 0000000..a2e539a
+--- /dev/null
++++ b/app/src/main/res/values/tv_styles.xml
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <style name="Theme.QuranTv" parent="android:Theme.Material.NoActionBar">
++        <item name="android:windowBackground">@android:color/black</item>
++        <item name="android:windowFullscreen">true</item>
++        <item name="android:windowNoTitle">true</item>
++    </style>
++</resources>

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="guard_desc">Kontrol TV: menutup dan mengunci aplikasi yang dikunci pemilik lewat bot Telegram. Tidak membaca isi layar.</string>
+    <color name="accent">#3D8BFF</color>
+</resources>
